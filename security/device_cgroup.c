@@ -14,6 +14,8 @@
 #include <linux/slab.h>
 #include <linux/rcupdate.h>
 #include <linux/mutex.h>
+#include <linux/bpf.h>
+#include <linux/bpf-cgroup.h>
 
 #define ACC_MKNOD 1
 #define ACC_READ  2
@@ -25,6 +27,60 @@
 #define DEV_ALL   4  /* this represents all devices */
 
 static DEFINE_MUTEX(devcgroup_mutex);
+
+#ifdef CONFIG_CGROUP_BPF
+static const struct bpf_func_proto *cg_dev_func_proto(enum bpf_func_id func_id)
+{
+	switch (func_id) {
+	case BPF_FUNC_map_lookup_elem:
+		return &bpf_map_lookup_elem_proto;
+	case BPF_FUNC_map_update_elem:
+		return &bpf_map_update_elem_proto;
+	case BPF_FUNC_map_delete_elem:
+		return &bpf_map_delete_elem_proto;
+	case BPF_FUNC_get_current_uid_gid:
+		return &bpf_get_current_uid_gid_proto;
+	case BPF_FUNC_get_current_pid_tgid:
+		return &bpf_get_current_pid_tgid_proto;
+	case BPF_FUNC_get_current_comm:
+		return &bpf_get_current_comm_proto;
+	case BPF_FUNC_ktime_get_ns:
+		return &bpf_ktime_get_ns_proto;
+	case BPF_FUNC_get_prandom_u32:
+		return &bpf_get_prandom_u32_proto;
+	default:
+		return NULL;
+	}
+}
+
+static bool cg_dev_is_valid_access(int off, int size,
+				   enum bpf_access_type type,
+				   struct bpf_insn_access_aux *info)
+{
+	if (type != BPF_READ)
+		return false;
+	if (off < 0 || off + size > sizeof(struct bpf_cgroup_dev_ctx))
+		return false;
+	if (off % size)
+		return false;
+	if (size != sizeof(__u32))
+		return false;
+
+	switch (off) {
+	case offsetof(struct bpf_cgroup_dev_ctx, access_type):
+	case offsetof(struct bpf_cgroup_dev_ctx, major):
+	case offsetof(struct bpf_cgroup_dev_ctx, minor):
+		return true;
+	default:
+		return false;
+	}
+}
+
+const struct bpf_verifier_ops cg_dev_prog_ops = {
+	.get_func_proto		= cg_dev_func_proto,
+	.is_valid_access	= cg_dev_is_valid_access,
+};
+#endif
 
 enum devcg_behavior {
 	DEVCG_DEFAULT_NONE,
@@ -815,6 +871,9 @@ static int __devcgroup_check_permission(short type, u32 major, u32 minor,
 {
 	struct dev_cgroup *dev_cgroup;
 	bool rc;
+
+	if (BPF_CGROUP_RUN_PROG_DEVICE(type, major, minor, access))
+		return -EPERM;
 
 	rcu_read_lock();
 	dev_cgroup = task_devcgroup(current);

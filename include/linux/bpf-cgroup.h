@@ -3,6 +3,7 @@
 #define _BPF_CGROUP_H
 
 #include <linux/jump_label.h>
+#include <linux/uaccess.h>
 #include <uapi/linux/bpf.h>
 
 struct sock;
@@ -45,12 +46,16 @@ int __cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
 			enum bpf_attach_type type, u32 flags);
 int __cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
 			enum bpf_attach_type type, u32 flags);
+int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
+		       union bpf_attr __user *uattr);
 
 /* Wrapper for __cgroup_bpf_*() protected by cgroup_mutex */
 int cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
 		      enum bpf_attach_type type, u32 flags);
 int cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
 		      enum bpf_attach_type type, u32 flags);
+int cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
+		     union bpf_attr __user *uattr);
 
 int __cgroup_bpf_run_filter_skb(struct sock *sk,
 				struct sk_buff *skb,
@@ -62,6 +67,8 @@ int __cgroup_bpf_run_filter_sk(struct sock *sk,
 int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
 				     struct bpf_sock_ops_kern *sock_ops,
 				     enum bpf_attach_type type);
+int __cgroup_bpf_run_filter_device(struct bpf_cgroup_dev_ctx *ctx,
+				  enum bpf_attach_type type);
 
 /* Wrappers for __cgroup_bpf_run_filter_skb() guarded by cgroup_bpf_enabled. */
 #define BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb)			      \
@@ -108,6 +115,21 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
 	}								       \
 	__ret;								       \
 })
+
+#define BPF_CGROUP_RUN_PROG_DEVICE(dev_type, major, minor, access)	       \
+({								       \
+	int __ret = 0;							       \
+	if (cgroup_bpf_enabled) {					       \
+		struct bpf_cgroup_dev_ctx __ctx = {			       \
+			.access_type = ((access) << 16) | (dev_type),	       \
+			.major = major,					       \
+			.minor = minor,					       \
+		};							       \
+		__ret = __cgroup_bpf_run_filter_device(&__ctx,	       \
+						       BPF_CGROUP_DEVICE);      \
+	}								       \
+	__ret;								       \
+})
 #else
 
 struct cgroup_bpf {};
@@ -118,6 +140,7 @@ static inline int cgroup_bpf_inherit(struct cgroup *cgrp) { return 0; }
 #define BPF_CGROUP_RUN_PROG_INET_EGRESS(sk,skb) ({ 0; })
 #define BPF_CGROUP_RUN_PROG_INET_SOCK(sk) ({ 0; })
 #define BPF_CGROUP_RUN_PROG_SOCK_OPS(sock_ops) ({ 0; })
+#define BPF_CGROUP_RUN_PROG_DEVICE(dev_type, major, minor, access) ({ 0; })
 
 #endif /* CONFIG_CGROUP_BPF */
 

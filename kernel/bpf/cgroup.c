@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/bpf.h>
 #include <linux/bpf-cgroup.h>
+#include <linux/uaccess.h>
 #include <net/sock.h>
 
 DEFINE_STATIC_KEY_FALSE(cgroup_bpf_enabled_key);
@@ -399,6 +400,48 @@ cleanup:
  * This function will return %-EPERM if any if an attached program was found
  * and if it returned != 1 during execution. In all other cases, 0 is returned.
  */
+int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
+		       union bpf_attr __user *uattr)
+{
+	__u32 __user *prog_ids = u64_to_user_ptr(attr->query.prog_ids);
+	struct list_head *progs;
+	struct bpf_prog_list *pl;
+	u32 flags, cnt, total;
+	enum bpf_attach_type type = attr->query.attach_type;
+
+	if (type >= MAX_BPF_ATTACH_TYPE || attr->query.query_flags)
+		return -EINVAL;
+
+	progs = &cgrp->bpf.progs[type];
+	flags = cgrp->bpf.flags[type];
+	total = prog_list_length(progs);
+	cnt = min_t(u32, attr->query.prog_cnt, total);
+
+	if (copy_to_user(&uattr->query.attach_flags, &flags, sizeof(flags)))
+		return -EFAULT;
+	if (copy_to_user(&uattr->query.prog_cnt, &total, sizeof(total)))
+		return -EFAULT;
+
+	if (cnt && !prog_ids)
+		return -EFAULT;
+
+	list_for_each_entry(pl, progs, node) {
+		u32 id;
+
+		if (!cnt)
+			break;
+		if (!pl->prog)
+			continue;
+
+		id = pl->prog->aux->id;
+		if (put_user(id, prog_ids++))
+			return -EFAULT;
+		cnt--;
+	}
+
+	return 0;
+}
+
 int __cgroup_bpf_run_filter_skb(struct sock *sk,
 				struct sk_buff *skb,
 				enum bpf_attach_type type)
@@ -478,3 +521,14 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
 	return ret == 1 ? 0 : -EPERM;
 }
 EXPORT_SYMBOL(__cgroup_bpf_run_filter_sock_ops);
+
+int __cgroup_bpf_run_filter_device(struct bpf_cgroup_dev_ctx *ctx,
+				  enum bpf_attach_type type)
+{
+	struct cgroup *cgrp = task_dfl_cgroup(current);
+	int ret;
+
+	ret = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[type], ctx, BPF_PROG_RUN);
+	return ret == 1 ? 0 : -EPERM;
+}
+EXPORT_SYMBOL(__cgroup_bpf_run_filter_device);
